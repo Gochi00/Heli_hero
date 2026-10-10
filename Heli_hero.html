@@ -1,0 +1,1531 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>IRON ROTOR: SAM Radar Navigation</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    * {
+      box-sizing: border-box;
+      user-select: none;
+      -webkit-user-select: none;
+      margin: 0;
+      padding: 0;
+      touch-action: none;
+    }
+    body, html {
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background-color: #050b07;
+      font-family: 'Courier New', Courier, monospace;
+    }
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+      background: #0a130e;
+    }
+    .scanlines {
+      pointer-events: none;
+      background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.28) 50%),
+                  radial-gradient(circle at center, transparent 55%, rgba(0, 0, 0, 0.75) 100%);
+      background-size: 100% 3px, 100% 100%;
+    }
+    .hud-glow {
+      text-shadow: 0 0 6px #22c55e, 0 0 14px #15803d;
+    }
+    .hud-danger {
+      text-shadow: 0 0 8px #ef4444, 0 0 18px #b91c1c;
+    }
+    .hud-amber {
+      text-shadow: 0 0 8px #f59e0b, 0 0 16px #b45309;
+    }
+    .hud-box {
+      box-shadow: inset 0 0 10px rgba(34, 197, 94, 0.35), 0 0 12px rgba(34, 197, 94, 0.2);
+    }
+  </style>
+</head>
+<body class="relative w-full h-full overflow-hidden select-none bg-black text-green-400 font-mono">
+
+  <!-- Main Game Canvas -->
+  <canvas id="gameCanvas" class="absolute inset-0 z-0"></canvas>
+  <div class="scanlines absolute inset-0 z-10"></div>
+
+  <!-- Tactical HUD Overlay -->
+  <div id="hud" class="absolute inset-0 z-20 pointer-events-none flex flex-col justify-between p-2 sm:p-4">
+    <!-- Top HUD Bar: Survival Timer, Threat Alarms, Altitude Info -->
+    <div class="flex justify-between items-start gap-2">
+      <!-- Mission Clock & Statistics -->
+      <div class="bg-black/85 border border-green-500/70 rounded p-2 sm:p-3 hud-box flex flex-col min-w-[130px] sm:min-w-[180px]">
+        <div class="text-[10px] sm:text-xs text-green-300 font-bold tracking-widest">MISSION CLOCK</div>
+        <div id="missionTimer" class="text-xl sm:text-3xl font-extrabold text-green-400 hud-glow">00:00.00</div>
+        <div class="text-[9px] sm:text-[11px] text-green-300/80 mt-1 flex justify-between">
+          <span>MISSILES EVADED:</span>
+          <span id="evadedCount" class="font-bold text-yellow-300">0</span>
+        </div>
+      </div>
+
+      <!-- Warning Banners Group -->
+      <div class="flex flex-col items-center gap-1.5 max-w-[50vw]">
+        <!-- RWR Missile Lock Alarm -->
+        <div id="warningBanner" class="hidden pointer-events-none px-4 py-1.5 bg-red-950/90 border border-red-500 rounded text-red-400 font-bold text-xs sm:text-sm tracking-widest text-center animate-pulse">
+          ⚠️ RADAR/IR MISSILE HOMING ⚠️
+        </div>
+
+        <!-- Overlapping SAM Radars Penetration Alarm -->
+        <div id="overlapBanner" class="hidden pointer-events-none px-3 py-1 bg-amber-950/90 border border-amber-500 rounded text-amber-300 font-bold text-[10px] sm:text-xs tracking-wider text-center animate-pulse">
+          ⚡ INTERLOCKING SAM RADARS TRACKING AIRCRAFT ⚡
+        </div>
+
+        <!-- Radar Penetration Corridor Alert -->
+        <div id="radarEncroachBanner" class="hidden pointer-events-none px-3 py-0.5 bg-red-950/70 border border-red-500/80 rounded text-red-300 text-[10px] font-semibold tracking-wider text-center">
+          INSIDE SAM UMBRELLA [DROP TO LOW OR JAM ECM]
+        </div>
+      </div>
+
+      <!-- Altitude Status & Minimap Position -->
+      <div class="bg-black/85 border border-green-500/70 rounded p-2 sm:p-3 hud-box text-right min-w-[130px] sm:min-w-[170px]">
+        <div class="text-[10px] sm:text-xs text-green-300 font-bold tracking-wider">ALTITUDE FLIGHT LEVEL</div>
+        <div id="altLabel" class="text-lg sm:text-2xl font-black text-amber-300">LOW (NOE)</div>
+        <div id="altThreatInfo" class="text-[9px] sm:text-[10px] text-amber-200/90 mt-0.5 font-semibold">SAM RADAR -50% | MANPADS ARMED</div>
+        <!-- Minimap 3x World Track Bar -->
+        <div class="w-full h-1.5 bg-green-950 rounded-full mt-2 overflow-hidden border border-green-800">
+          <div id="worldPosBar" class="h-full bg-green-400 w-1/3 transition-all duration-75"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Center RWR Missile Lock Proximity -->
+    <div id="rwrCenterAlert" class="self-center hidden text-center pointer-events-none">
+      <div class="text-red-500 font-black tracking-widest text-base sm:text-xl hud-danger animate-bounce">
+        [ LETHAL INTERCEPT IMMINENT ]
+      </div>
+      <div id="threatDistDisplay" class="text-xs text-red-300 font-bold">RANGE: --- M</div>
+    </div>
+
+    <!-- Bottom Controls & Countermeasure Dashboard -->
+    <div class="flex flex-wrap items-end justify-between gap-2 pointer-events-auto">
+      
+      <!-- Countermeasure Inventory Panel -->
+      <div class="flex items-center gap-2 sm:gap-3 bg-black/85 p-2 rounded border border-green-500/60 backdrop-blur-sm">
+        <!-- Flare Countermeasure Button -->
+        <button id="flareBtn" class="flex flex-col items-center justify-center w-16 h-16 sm:w-20 sm:h-20 rounded bg-amber-950/80 active:bg-amber-600 border-2 border-amber-500 text-amber-300 shadow-lg select-none transition-transform active:scale-95">
+          <span class="text-[9px] sm:text-[10px] font-bold tracking-tighter">FLARE [F]</span>
+          <span class="text-lg sm:text-2xl font-black" id="flareCount">6</span>
+          <span class="text-[8px] text-amber-200">DEFEAT MANPAD</span>
+        </button>
+
+        <!-- Chaff Countermeasure Button -->
+        <button id="chaffBtn" class="flex flex-col items-center justify-center w-16 h-16 sm:w-20 sm:h-20 rounded bg-cyan-950/80 active:bg-cyan-600 border-2 border-cyan-400 text-cyan-300 shadow-lg select-none transition-transform active:scale-95">
+          <span class="text-[9px] sm:text-[10px] font-bold tracking-tighter">CHAFF [C]</span>
+          <span class="text-lg sm:text-2xl font-black" id="chaffCount">6</span>
+          <span class="text-[8px] text-cyan-200">DEFEAT SAM</span>
+        </button>
+
+        <!-- Radar Jammer ECM Button -->
+        <button id="jamBtn" class="flex flex-col items-center justify-center w-16 h-16 sm:w-20 sm:h-20 rounded bg-purple-950/80 active:bg-purple-600 border-2 border-purple-400 text-purple-300 shadow-lg select-none transition-transform active:scale-95">
+          <span class="text-[9px] sm:text-[10px] font-bold tracking-tighter">JAMMER [J]</span>
+          <span class="text-xs sm:text-sm font-black" id="jamStatus">RDY</span>
+          <span class="text-[8px] text-purple-200">-70% RADAR</span>
+        </button>
+      </div>
+
+      <!-- Flight Operations: Altitude Toggle & Help -->
+      <div class="flex flex-col items-end gap-1.5">
+        <button id="altToggleBtn" class="w-36 sm:w-44 py-2.5 sm:py-3.5 px-3 rounded-lg bg-green-950/90 active:bg-green-700 border-2 border-green-400 text-green-300 font-bold text-xs sm:text-sm shadow-lg tracking-wider active:scale-95 flex items-center justify-center gap-1.5">
+          <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4"/>
+          </svg>
+          <span id="altToggleLabel">ALTITUDE: LOW [SPACE]</span>
+        </button>
+        <div class="text-[9px] sm:text-[10px] text-green-400/80 bg-black/70 px-2 py-0.5 rounded border border-green-900/60">
+          JOYSTICK: DRAG ANYWHERE • WASD / ARROWS
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Post-Mission Lost Aircraft Debriefing Modal -->
+  <div id="gameOverModal" class="hidden absolute inset-0 z-30 flex items-center justify-center bg-black/90 backdrop-blur-md p-4">
+    <div class="max-w-md w-full bg-black border-2 border-red-600 rounded-lg p-6 sm:p-8 text-center shadow-2xl relative">
+      <div class="text-3xl sm:text-4xl font-black text-red-500 tracking-widest mb-2 hud-danger">
+        AIRCRAFT DOWNED
+      </div>
+      <p id="deathCause" class="text-xs sm:text-sm text-red-300 mb-6 font-semibold">DESTROYED BY MISSILE DETONATION</p>
+
+      <div class="space-y-3 bg-red-950/30 border border-red-900/60 rounded p-4 mb-6 text-sm">
+        <div class="flex justify-between border-b border-red-900/40 pb-1">
+          <span class="text-neutral-400">MISSION ENDURANCE:</span>
+          <span id="statTime" class="font-bold text-green-400 text-base">00:00.00</span>
+        </div>
+        <div class="flex justify-between border-b border-red-900/40 pb-1">
+          <span class="text-neutral-400">MISSILES EVADED:</span>
+          <span id="statEvaded" class="font-bold text-yellow-400">0</span>
+        </div>
+        <div class="flex justify-between border-b border-red-900/40 pb-1">
+          <span class="text-neutral-400">FLARES DEPLOYED:</span>
+          <span id="statFlares" class="font-bold text-amber-400">0 / 6</span>
+        </div>
+        <div class="flex justify-between border-b border-red-900/40 pb-1">
+          <span class="text-neutral-400">CHAFF DISPENSED:</span>
+          <span id="statChaff" class="font-bold text-cyan-400">0 / 6</span>
+        </div>
+        <div class="flex justify-between">
+          <span class="text-neutral-400">RADAR ECM CYCLES:</span>
+          <span id="statJams" class="font-bold text-purple-400">0</span>
+        </div>
+      </div>
+
+      <button id="restartBtn" class="w-full py-3.5 bg-green-600 hover:bg-green-500 active:scale-95 text-black font-extrabold text-base rounded shadow-lg transition-transform uppercase tracking-wider">
+        Scramble Replacement Helicopter
+      </button>
+    </div>
+  </div>
+
+  <script>
+/**
+ * Procedural Web Audio Engine for IRON ROTOR
+ * Generates continuous rotor modulation, missile sweeps, countermeasure sounds, and RWR tones.
+ */
+class SoundEngine {
+  constructor() {
+    this.ctx = null;
+    this.engineGain = null;
+    this.engineOsc = null;
+    this.engineMod = null;
+    this.isAudioStarted = false;
+  }
+
+  init() {
+    if (this.isAudioStarted) return;
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      this.ctx = new AudioCtx();
+
+      // Rotor chop synth
+      this.engineGain = this.ctx.createGain();
+      this.engineGain.gain.setValueAtTime(0.08, this.ctx.currentTime);
+      this.engineGain.connect(this.ctx.destination);
+
+      this.engineOsc = this.ctx.createOscillator();
+      this.engineOsc.type = 'sawtooth';
+      this.engineOsc.frequency.setValueAtTime(45, this.ctx.currentTime);
+
+      this.engineMod = this.ctx.createOscillator();
+      this.engineMod.frequency.setValueAtTime(11, this.ctx.currentTime);
+
+      const modGain = this.ctx.createGain();
+      modGain.gain.setValueAtTime(0.06, this.ctx.currentTime);
+
+      this.engineMod.connect(modGain.gain);
+      this.engineOsc.connect(this.engineGain);
+
+      this.engineOsc.start();
+      this.engineMod.start();
+      this.isAudioStarted = true;
+    } catch (e) {
+      console.warn("Audio Context init deferred:", e);
+    }
+  }
+
+  setEngineSpeed(highAlt) {
+    if (!this.ctx || !this.engineOsc) return;
+    const targetFreq = highAlt ? 54 : 44;
+    const chopFreq = highAlt ? 14 : 10;
+    this.engineOsc.frequency.setTargetAtTime(targetFreq, this.ctx.currentTime, 0.2);
+    this.engineMod.frequency.setTargetAtTime(chopFreq, this.ctx.currentTime, 0.2);
+  }
+
+  playLaunchSound(isSAM = false) {
+    if (!this.ctx) return;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    const filter = this.ctx.createBiquadFilter();
+
+    osc.type = isSAM ? 'sawtooth' : 'triangle';
+    const now = this.ctx.currentTime;
+    osc.frequency.setValueAtTime(isSAM ? 110 : 260, now);
+    osc.frequency.exponentialRampToValueAtTime(isSAM ? 580 : 900, now + 0.45);
+
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(2400, now);
+
+    gain.gain.setValueAtTime(0.2, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.52);
+
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.ctx.destination);
+
+    osc.start(now);
+    osc.stop(now + 0.55);
+  }
+
+  playFlareSound() {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    const bufferSize = this.ctx.sampleRate * 0.35;
+    const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] = (Math.random() * 2 - 1) * Math.exp(-i / (bufferSize * 0.2));
+    }
+    const noise = this.ctx.createBufferSource();
+    noise.buffer = buffer;
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(0.26, now);
+    gain.gain.linearRampToValueAtTime(0.01, now + 0.35);
+
+    noise.connect(gain);
+    gain.connect(this.ctx.destination);
+    noise.start(now);
+  }
+
+  playChaffSound() {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(3400, now);
+    osc.frequency.linearRampToValueAtTime(1200, now + 0.42);
+
+    gain.gain.setValueAtTime(0.16, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.46);
+
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.46);
+  }
+
+  playExplosion(big = false) {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    const dur = big ? 0.85 : 0.42;
+    const bufferSize = this.ctx.sampleRate * dur;
+    const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+    const data = buffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / bufferSize, 1.8);
+    }
+    const noise = this.ctx.createBufferSource();
+    noise.buffer = buffer;
+
+    const filter = this.ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.setValueAtTime(big ? 340 : 700, now);
+    filter.frequency.linearRampToValueAtTime(80, now + dur);
+
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(big ? 0.42 : 0.22, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+
+    noise.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.ctx.destination);
+    noise.start(now);
+  }
+
+  playWarningBeep(urgency = 1) {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(urgency > 1.5 ? 1040 : 780, now);
+
+    gain.gain.setValueAtTime(0.13, now);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.09);
+  }
+
+  playJammerTone() {
+    if (!this.ctx) return;
+    const now = this.ctx.currentTime;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(460, now);
+    osc.frequency.linearRampToValueAtTime(110, now + 0.35);
+    gain.gain.setValueAtTime(0.22, now);
+    gain.gain.linearRampToValueAtTime(0.01, now + 0.35);
+    osc.connect(gain);
+    gain.connect(this.ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.35);
+  }
+}
+
+const audio = new SoundEngine();
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+let screenWidth = window.innerWidth;
+let screenHeight = window.innerHeight;
+let WORLD_WIDTH = screenWidth * 3;
+let WORLD_HEIGHT = screenHeight;
+
+// Base SAM Radar radius covers 75% of the screen dimension
+function getSamBaseRadius() {
+  const primaryDimension = Math.max(screenWidth, screenHeight);
+  return Math.round(primaryDimension * 0.75);
+}
+
+function resize() {
+  screenWidth = window.innerWidth;
+  screenHeight = window.innerHeight;
+  canvas.width = screenWidth;
+  canvas.height = screenHeight;
+  WORLD_WIDTH = screenWidth * 3;
+  WORLD_HEIGHT = screenHeight;
+}
+window.addEventListener('resize', resize);
+resize();
+
+const GAME = {
+  running: true,
+  startTime: performance.now(),
+  survivalTime: 0,
+  evadedCount: 0,
+  flaresLeft: 6,
+  flaresUsed: 0,
+  chaffLeft: 6,
+  chaffUsed: 0,
+  jamCooldown: 0,
+  jamActiveTimer: 0,
+  jamTotalUsed: 0,
+  altitude: 'LOW', // 'LOW' or 'HIGH'
+  cameraX: screenWidth,
+  terrainScrollY: 0,
+  speed: 165
+};
+
+const player = {
+  x: WORLD_WIDTH / 2,
+  y: screenHeight * 0.75,
+  vx: 0,
+  vy: 0,
+  speed: 315,
+  heading: -Math.PI / 2,
+  rotorAngle: 0,
+  hitRadius: 16,
+  altTransition: 0
+};
+
+const keys = {
+  w: false, s: false, a: false, d: false,
+  ArrowUp: false, ArrowDown: false, ArrowLeft: false, ArrowRight: false
+};
+
+const touchStick = {
+  active: false,
+  touchId: null,
+  startX: 0,
+  startY: 0,
+  currentX: 0,
+  currentY: 0,
+  dx: 0,
+  dy: 0,
+  maxRadius: 55
+};
+
+const groundEnemies = [];
+const missiles = [];
+const decoys = [];
+const particles = [];
+
+window.addEventListener('keydown', (e) => {
+  audio.init();
+  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(e.key)) {
+    e.preventDefault();
+  }
+  if (e.key in keys) keys[e.key] = true;
+  if (e.key.toLowerCase() === 'w') keys.w = true;
+  if (e.key.toLowerCase() === 's') keys.s = true;
+  if (e.key.toLowerCase() === 'a') keys.a = true;
+  if (e.key.toLowerCase() === 'd') keys.d = true;
+
+  if (e.key.toLowerCase() === 'f') triggerFlare();
+  if (e.key.toLowerCase() === 'c') triggerChaff();
+  if (e.key.toLowerCase() === 'j') triggerJammer();
+  if (e.key === ' ' || e.key.toLowerCase() === 'space') toggleAltitude();
+});
+
+window.addEventListener('keyup', (e) => {
+  if (e.key in keys) keys[e.key] = false;
+  if (e.key.toLowerCase() === 'w') keys.w = false;
+  if (e.key.toLowerCase() === 's') keys.s = false;
+  if (e.key.toLowerCase() === 'a') keys.a = false;
+  if (e.key.toLowerCase() === 'd') keys.d = false;
+});
+
+window.addEventListener('touchstart', (e) => {
+  audio.init();
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const t = e.changedTouches[i];
+    const targetEl = document.elementFromPoint(t.clientX, t.clientY);
+    if (targetEl && (targetEl.tagName === 'BUTTON' || targetEl.closest('button'))) {
+      continue;
+    }
+    if (!touchStick.active) {
+      touchStick.active = true;
+      touchStick.touchId = t.identifier;
+      touchStick.startX = t.clientX;
+      touchStick.startY = t.clientY;
+      touchStick.currentX = t.clientX;
+      touchStick.currentY = t.clientY;
+      touchStick.dx = 0;
+      touchStick.dy = 0;
+      break;
+    }
+  }
+}, { passive: false });
+
+window.addEventListener('touchmove', (e) => {
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    const t = e.changedTouches[i];
+    if (touchStick.active && t.identifier === touchStick.touchId) {
+      touchStick.currentX = t.clientX;
+      touchStick.currentY = t.clientY;
+      const rawDx = touchStick.currentX - touchStick.startX;
+      const rawDy = touchStick.currentY - touchStick.startY;
+      const dist = Math.hypot(rawDx, rawDy);
+      if (dist > touchStick.maxRadius) {
+        touchStick.dx = (rawDx / dist) * touchStick.maxRadius;
+        touchStick.dy = (rawDy / dist) * touchStick.maxRadius;
+      } else {
+        touchStick.dx = rawDx;
+        touchStick.dy = rawDy;
+      }
+      break;
+    }
+  }
+}, { passive: false });
+
+function endTouch(e) {
+  for (let i = 0; i < e.changedTouches.length; i++) {
+    if (touchStick.active && e.changedTouches[i].identifier === touchStick.touchId) {
+      touchStick.active = false;
+      touchStick.touchId = null;
+      touchStick.dx = 0;
+      touchStick.dy = 0;
+      break;
+    }
+  }
+}
+window.addEventListener('touchend', endTouch);
+window.addEventListener('touchcancel', endTouch);
+
+document.getElementById('flareBtn').addEventListener('click', triggerFlare);
+document.getElementById('chaffBtn').addEventListener('click', triggerChaff);
+document.getElementById('jamBtn').addEventListener('click', triggerJammer);
+document.getElementById('altToggleBtn').addEventListener('click', toggleAltitude);
+document.getElementById('restartBtn').addEventListener('click', restartGame);
+
+function toggleAltitude() {
+  if (!GAME.running) return;
+  GAME.altitude = (GAME.altitude === 'LOW') ? 'HIGH' : 'LOW';
+  audio.setEngineSpeed(GAME.altitude === 'HIGH');
+  updateAltitudeUI();
+}
+
+function updateAltitudeUI() {
+  const label = document.getElementById('altLabel');
+  const threatInfo = document.getElementById('altThreatInfo');
+  const toggleBtnLabel = document.getElementById('altToggleLabel');
+
+  if (GAME.altitude === 'HIGH') {
+    label.innerText = 'HIGH (FL100)';
+    label.className = 'text-lg sm:text-2xl font-black text-cyan-300';
+    threatInfo.innerText = 'MANPADS IMMUNE | SAM RADAR 100% (75% SCREEN)';
+    threatInfo.className = 'text-[9px] sm:text-[10px] text-cyan-200/90 mt-0.5 font-semibold';
+    toggleBtnLabel.innerText = 'ALTITUDE: HIGH [SPACE]';
+  } else {
+    label.innerText = 'LOW (NOE)';
+    label.className = 'text-lg sm:text-2xl font-black text-amber-300';
+    threatInfo.innerText = 'SAM RADAR -50% | MANPADS ACTIVE';
+    threatInfo.className = 'text-[9px] sm:text-[10px] text-amber-200/90 mt-0.5 font-semibold';
+    toggleBtnLabel.innerText = 'ALTITUDE: LOW [SPACE]';
+  }
+}
+
+function triggerFlare() {
+  if (!GAME.running || GAME.flaresLeft <= 0) return;
+  GAME.flaresLeft--;
+  GAME.flaresUsed++;
+  document.getElementById('flareCount').innerText = GAME.flaresLeft;
+  audio.playFlareSound();
+
+  for (let i = 0; i < 4; i++) {
+    const angle = (Math.PI / 2) + (Math.random() - 0.5) * 1.6;
+    const speed = 70 + Math.random() * 85;
+    decoys.push({
+      type: 'FLARE',
+      x: player.x + (Math.random() - 0.5) * 10,
+      y: player.y + 10,
+      vx: Math.cos(angle) * speed + player.vx * 0.2,
+      vy: Math.sin(angle) * speed + GAME.speed * 0.4,
+      life: 2.8 + Math.random() * 0.7,
+      maxLife: 3.5,
+      radius: 6
+    });
+  }
+}
+
+function triggerChaff() {
+  if (!GAME.running || GAME.chaffLeft <= 0) return;
+  GAME.chaffLeft--;
+  GAME.chaffUsed++;
+  document.getElementById('chaffCount').innerText = GAME.chaffLeft;
+  audio.playChaffSound();
+
+  for (let i = 0; i < 6; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 25 + Math.random() * 45;
+    decoys.push({
+      type: 'CHAFF',
+      x: player.x + (Math.random() - 0.5) * 12,
+      y: player.y + 8,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed + GAME.speed * 0.25,
+      life: 4.2,
+      maxLife: 4.2,
+      radius: 15 + Math.random() * 8
+    });
+  }
+}
+
+function triggerJammer() {
+  if (!GAME.running) return;
+  if (GAME.jamActiveTimer > 0 || GAME.jamCooldown > 0) return;
+
+  GAME.jamActiveTimer = 10;
+  GAME.jamCooldown = 20;
+  GAME.jamTotalUsed++;
+  audio.playJammerTone();
+}
+
+const terrainTiles = [];
+function initTerrain() {
+  terrainTiles.length = 0;
+  for (let i = 0; i < 50; i++) {
+    terrainTiles.push({
+      x: Math.random() * WORLD_WIDTH,
+      y: Math.random() * (WORLD_HEIGHT * 2),
+      width: 150 + Math.random() * 240,
+      height: 100 + Math.random() * 200,
+      color: ['#122315', '#162b1b', '#0e1c11', '#1f3523'][Math.floor(Math.random() * 4)]
+    });
+  }
+}
+initTerrain();
+
+function spawnGroundEnemy() {
+  const spawnY = -120;
+  const roll = Math.random();
+
+  // SAM Sites with 75% screen radius: spaced across the 3x width to form corridors
+  if (roll < 0.32) {
+    const baseRadius = getSamBaseRadius();
+    // Stagger across sectors
+    const sectors = [0.2, 0.5, 0.8];
+    const sectorNorm = sectors[Math.floor(Math.random() * sectors.length)];
+    const posX = Math.max(160, Math.min(WORLD_WIDTH - 160, (sectorNorm * WORLD_WIDTH) + (Math.random() - 0.5) * 450));
+
+    groundEnemies.push({
+      id: Math.random(),
+      type: 'SAM',
+      x: posX,
+      y: spawnY,
+      radarAngle: Math.random() * Math.PI * 2,
+      radarSpeed: 0.9 + Math.random() * 0.8,
+      radarRange: baseRadius, // 75% of screen dimension!
+      fireTimer: 2.2 + Math.random() * 2.8,
+      active: true
+    });
+  } else {
+    // Infantry MANPADS squads
+    const squadSize = Math.floor(Math.random() * 3) + 2;
+    const clusterX = Math.random() * (WORLD_WIDTH - 240) + 120;
+
+    for (let m = 0; m < squadSize; m++) {
+      groundEnemies.push({
+        id: Math.random(),
+        type: 'MANPADS',
+        x: Math.max(60, Math.min(WORLD_WIDTH - 60, clusterX + (Math.random() - 0.5) * 160)),
+        y: spawnY + (Math.random() - 0.5) * 90,
+        radarAngle: 0,
+        radarRange: 270,
+        fireTimer: 1.1 + Math.random() * 2.8,
+        active: true
+      });
+    }
+  }
+}
+
+function fireMissile(source) {
+  const isSam = source.type === 'SAM';
+  audio.playLaunchSound(isSam);
+
+  const angle = Math.atan2(player.y - source.y, player.x - source.x);
+  missiles.push({
+    sourceType: source.type,
+    x: source.x,
+    y: source.y,
+    vx: Math.cos(angle) * (isSam ? 210 : 185),
+    vy: Math.sin(angle) * (isSam ? 210 : 185),
+    maxSpeed: isSam ? 350 : 385,
+    turnRate: isSam ? 2.0 : 2.9,
+    targetType: isSam ? 'SAM' : 'MANPADS',
+    lifeTimer: 5.0, // EXACTLY 5.0 SECONDS SELF-DESTRUCT
+    maxLife: 5.0,
+    distracted: false,
+    trailTimer: 0
+  });
+}
+
+function updateMissiles(dt) {
+  for (let i = missiles.length - 1; i >= 0; i--) {
+    const m = missiles[i];
+    m.lifeTimer -= dt;
+
+    if (m.lifeTimer <= 0) {
+      createExplosion(m.x, m.y, '#f59e0b', 18);
+      audio.playExplosion(false);
+      GAME.evadedCount++;
+      document.getElementById('evadedCount').innerText = GAME.evadedCount;
+      missiles.splice(i, 1);
+      continue;
+    }
+
+    let target = { x: player.x, y: player.y };
+
+    if (!m.distracted) {
+      if (m.targetType === 'MANPADS') {
+        for (const d of decoys) {
+          if (d.type === 'FLARE') {
+            const distToFlare = Math.hypot(d.x - m.x, d.y - m.y);
+            if (distToFlare < 270) {
+              m.distracted = true;
+              m.distractedTarget = d;
+              break;
+            }
+          }
+        }
+      } else if (m.targetType === 'SAM') {
+        for (const d of decoys) {
+          if (d.type === 'CHAFF') {
+            const distToChaff = Math.hypot(d.x - m.x, d.y - m.y);
+            if (distToChaff < 320) {
+              m.distracted = true;
+              m.distractedTarget = d;
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    if (m.distracted && m.distractedTarget) {
+      target = { x: m.distractedTarget.x, y: m.distractedTarget.y };
+    }
+
+    const targetAngle = Math.atan2(target.y - m.y, target.x - m.x);
+    const currentAngle = Math.atan2(m.vy, m.vx);
+    let diffAngle = targetAngle - currentAngle;
+
+    while (diffAngle < -Math.PI) diffAngle += Math.PI * 2;
+    while (diffAngle > Math.PI) diffAngle -= Math.PI * 2;
+
+    const steer = Math.sign(diffAngle) * Math.min(Math.abs(diffAngle), m.turnRate * dt);
+    const newAngle = currentAngle + steer;
+
+    const speed = Math.min(m.maxSpeed, Math.hypot(m.vx, m.vy) + 125 * dt);
+    m.vx = Math.cos(newAngle) * speed;
+    m.vy = Math.sin(newAngle) * speed;
+
+    m.x += m.vx * dt;
+    m.y += m.vy * dt;
+
+    m.trailTimer += dt;
+    if (m.trailTimer > 0.02) {
+      m.trailTimer = 0;
+      particles.push({
+        x: m.x,
+        y: m.y,
+        vx: (Math.random() - 0.5) * 10,
+        vy: (Math.random() - 0.5) * 10 + 20,
+        life: 0.45,
+        maxLife: 0.45,
+        color: m.sourceType === 'SAM' ? 'rgba(220, 220, 255, 0.75)' : 'rgba(255, 185, 60, 0.85)',
+        size: m.sourceType === 'SAM' ? 4.2 : 3.2
+      });
+    }
+
+    const distToPlayer = Math.hypot(player.x - m.x, player.y - m.y);
+    const effectivePlayerRadius = player.hitRadius * (player.altTransition > 0.5 ? 1.25 : 1.0);
+
+    if (distToPlayer < effectivePlayerRadius + 8) {
+      createExplosion(player.x, player.y, '#ef4444', 38, true);
+      audio.playExplosion(true);
+      killPlayer(`DESTROYED BY ${m.sourceType} MISSILE DETONATION`);
+      return;
+    }
+  }
+}
+
+function createExplosion(x, y, color = '#ff8800', count = 20, large = false) {
+  for (let i = 0; i < count; i++) {
+    const angle = Math.random() * Math.PI * 2;
+    const speed = 40 + Math.random() * (large ? 260 : 150);
+    particles.push({
+      x: x,
+      y: y,
+      vx: Math.cos(angle) * speed,
+      vy: Math.sin(angle) * speed,
+      life: 0.5 + Math.random() * 0.4,
+      maxLife: 0.9,
+      color: color,
+      size: (large ? 5 : 3) + Math.random() * 4
+    });
+  }
+}
+
+function updateDecoys(dt) {
+  for (let i = decoys.length - 1; i >= 0; i--) {
+    const d = decoys[i];
+    d.life -= dt;
+    d.x += d.vx * dt;
+    d.y += d.vy * dt;
+    d.vx *= 0.98;
+    d.vy *= 0.98;
+
+    if (d.type === 'FLARE' && Math.random() < 0.6) {
+      particles.push({
+        x: d.x + (Math.random() - 0.5) * 6,
+        y: d.y,
+        vx: 0,
+        vy: 20,
+        life: 0.25,
+        maxLife: 0.25,
+        color: '#fbbf24',
+        size: 2.5
+      });
+    }
+
+    if (d.life <= 0) decoys.splice(i, 1);
+  }
+
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.life -= dt;
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    if (p.life <= 0) particles.splice(i, 1);
+  }
+}
+
+let lastFrameTime = performance.now();
+let spawnCounter = 0;
+let beepIntervalTimer = 0;
+
+function updateGroundEnemies(dt) {
+  const jammerActive = GAME.jamActiveTimer > 0;
+  // Jammer drops radar circle by 70% (multiplier 0.30)
+  const jammerMultiplier = jammerActive ? 0.30 : 1.0;
+  // Low altitude drops SAM radar range by 50% (multiplier 0.50); High altitude is 1.0
+  const altitudeMultiplier = (GAME.altitude === 'LOW') ? 0.50 : 1.0;
+
+  let radarLocksOnPlayer = 0;
+  let insideAnySamZone = false;
+
+  for (let i = groundEnemies.length - 1; i >= 0; i--) {
+    const e = groundEnemies[i];
+    e.y += GAME.speed * dt;
+    if (e.radarSpeed) {
+      e.radarAngle += e.radarSpeed * dt;
+    }
+
+    // Dynamic scale to screen dimension
+    if (e.type === 'SAM') {
+      e.radarRange = getSamBaseRadius();
+    }
+
+    if (e.y > screenHeight + e.radarRange + 50) {
+      groundEnemies.splice(i, 1);
+      continue;
+    }
+
+    const distToPlayer = Math.hypot(player.x - e.x, player.y - e.y);
+
+    if (e.type === 'MANPADS') {
+      // High altitude: CANNOT TARGET. Low altitude: ATTACKS
+      if (GAME.altitude === 'LOW') {
+        if (distToPlayer < 380) {
+          e.fireTimer -= dt;
+          if (e.fireTimer <= 0) {
+            fireMissile(e);
+            e.fireTimer = 3.6 + Math.random() * 2.6;
+          }
+        }
+      }
+    } else if (e.type === 'SAM') {
+      const effectiveDetectionRange = e.radarRange * altitudeMultiplier * jammerMultiplier;
+
+      if (distToPlayer <= effectiveDetectionRange) {
+        radarLocksOnPlayer++;
+        insideAnySamZone = true;
+        e.fireTimer -= dt;
+
+        if (e.fireTimer <= 0) {
+          fireMissile(e);
+          e.fireTimer = 3.6 + Math.random() * 2.2;
+        }
+      }
+    }
+  }
+
+  // Overlap and encroachment banner updates
+  const overlapBanner = document.getElementById('overlapBanner');
+  if (overlapBanner) {
+    if (radarLocksOnPlayer >= 2) {
+      overlapBanner.classList.remove('hidden');
+      overlapBanner.innerText = `⚡ ${radarLocksOnPlayer} INTERLOCKING SAM RADARS TRACKING AIRCRAFT ⚡`;
+    } else {
+      overlapBanner.classList.add('hidden');
+    }
+  }
+
+  const encroachBanner = document.getElementById('radarEncroachBanner');
+  if (encroachBanner) {
+    if (insideAnySamZone) {
+      encroachBanner.classList.remove('hidden');
+    } else {
+      encroachBanner.classList.add('hidden');
+    }
+  }
+}
+
+function update(dt) {
+  GAME.survivalTime = (performance.now() - GAME.startTime) / 1000;
+  const mins = Math.floor(GAME.survivalTime / 60).toString().padStart(2, '0');
+  const secs = (GAME.survivalTime % 60).toFixed(2).padStart(5, '0');
+  document.getElementById('missionTimer').innerText = `${mins}:${secs}`;
+
+  // Jammer countdown
+  if (GAME.jamActiveTimer > 0) {
+    GAME.jamActiveTimer -= dt;
+    const jamBtn = document.getElementById('jamBtn');
+    document.getElementById('jamStatus').innerText = `${Math.ceil(GAME.jamActiveTimer)}s`;
+    jamBtn.classList.add('animate-pulse', 'border-purple-300', 'bg-purple-800');
+  } else {
+    const jamBtn = document.getElementById('jamBtn');
+    jamBtn.classList.remove('animate-pulse', 'border-purple-300', 'bg-purple-800');
+    if (GAME.jamCooldown > 0) {
+      GAME.jamCooldown -= dt;
+      document.getElementById('jamStatus').innerText = `${Math.ceil(GAME.jamCooldown)}s`;
+    } else {
+      document.getElementById('jamStatus').innerText = 'RDY';
+    }
+  }
+
+  const targetAltVal = GAME.altitude === 'HIGH' ? 1 : 0;
+  player.altTransition += (targetAltVal - player.altTransition) * 5 * dt;
+
+  let moveX = 0;
+  let moveY = 0;
+
+  if (keys.w || keys.ArrowUp) moveY -= 1;
+  if (keys.s || keys.ArrowDown) moveY += 1;
+  if (keys.a || keys.ArrowLeft) moveX -= 1;
+  if (keys.d || keys.ArrowRight) moveX += 1;
+
+  if (touchStick.active) {
+    moveX = touchStick.dx / touchStick.maxRadius;
+    moveY = touchStick.dy / touchStick.maxRadius;
+  }
+
+  const moveLen = Math.hypot(moveX, moveY);
+  if (moveLen > 0.05) {
+    const normX = moveX / (moveLen > 1 ? moveLen : 1);
+    const normY = moveY / (moveLen > 1 ? moveLen : 1);
+    player.vx += (normX * player.speed - player.vx) * 8 * dt;
+    player.vy += (normY * player.speed - player.vy) * 8 * dt;
+    player.heading = Math.atan2(player.vy, player.vx);
+  } else {
+    player.vx *= Math.pow(0.01, dt);
+    player.vy *= Math.pow(0.01, dt);
+    player.heading = -Math.PI / 2;
+  }
+
+  player.x += player.vx * dt;
+  player.y += player.vy * dt;
+
+  const borderMargin = 40;
+  player.x = Math.max(borderMargin, Math.min(WORLD_WIDTH - borderMargin, player.x));
+  player.y = Math.max(80, Math.min(screenHeight - 80, player.y));
+
+  // 3x World horizontal camera tracking
+  const targetCamX = player.x - screenWidth / 2;
+  const maxCamX = WORLD_WIDTH - screenWidth;
+  GAME.cameraX += (Math.max(0, Math.min(maxCamX, targetCamX)) - GAME.cameraX) * 7 * dt;
+
+  GAME.terrainScrollY += GAME.speed * dt;
+  if (GAME.terrainScrollY > screenHeight) {
+    GAME.terrainScrollY -= screenHeight;
+  }
+
+  player.rotorAngle += (GAME.altitude === 'HIGH' ? 36 : 28) * dt;
+
+  const ratio = (player.x / WORLD_WIDTH) * 100;
+  document.getElementById('worldPosBar').style.marginLeft = `${Math.max(0, Math.min(66, ratio - 16))}%`;
+
+  spawnCounter += dt;
+  const spawnInterval = Math.max(1.3, 2.3 - (GAME.survivalTime * 0.02));
+  if (spawnCounter > spawnInterval) {
+    spawnCounter = 0;
+    spawnGroundEnemy();
+  }
+
+  updateGroundEnemies(dt);
+  updateMissiles(dt);
+  updateDecoys(dt);
+  evaluateThreatWarnings(dt);
+}
+
+function evaluateThreatWarnings(dt) {
+  let closestMissileDist = Infinity;
+  let lockDetected = false;
+  let activeLockThreat = null;
+
+  for (const m of missiles) {
+    if (!m.distracted) {
+      const d = Math.hypot(player.x - m.x, player.y - m.y);
+      if (d < closestMissileDist) {
+        closestMissileDist = d;
+      }
+      lockDetected = true;
+      activeLockThreat = m;
+    }
+  }
+
+  const banner = document.getElementById('warningBanner');
+  const rwrAlert = document.getElementById('rwrCenterAlert');
+  const distDisp = document.getElementById('threatDistDisplay');
+
+  if (lockDetected && activeLockThreat) {
+    banner.classList.remove('hidden');
+    rwrAlert.classList.remove('hidden');
+    distDisp.innerText = `RANGE: ${Math.round(closestMissileDist)} M [DETONATION: ${activeLockThreat.lifeTimer.toFixed(1)}s]`;
+
+    beepIntervalTimer += dt;
+    const beepPeriod = Math.max(0.12, closestMissileDist / 900);
+    if (beepIntervalTimer >= beepPeriod) {
+      beepIntervalTimer = 0;
+      audio.playWarningBeep(closestMissileDist < 250 ? 2 : 1);
+    }
+  } else {
+    banner.classList.add('hidden');
+    rwrAlert.classList.add('hidden');
+    beepIntervalTimer = 0;
+  }
+}
+
+function renderGroundEnemies() {
+  const jammerActive = GAME.jamActiveTimer > 0;
+  const jammerMultiplier = jammerActive ? 0.30 : 1.0;
+  const altitudeMultiplier = (GAME.altitude === 'LOW') ? 0.50 : 1.0;
+
+  // PASS 1: Render glowing radar coverage discs with screen-blend highlighting
+  ctx.save();
+  ctx.globalCompositeOperation = 'screen';
+  for (const e of groundEnemies) {
+    if (e.type === 'SAM') {
+      const radius = e.radarRange * altitudeMultiplier * jammerMultiplier;
+
+      // Soft radar field gradient
+      const radGrad = ctx.createRadialGradient(e.x, e.y, 10, e.x, e.y, radius);
+      if (jammerActive) {
+        radGrad.addColorStop(0, 'rgba(168, 85, 247, 0.28)');
+        radGrad.addColorStop(0.7, 'rgba(168, 85, 247, 0.12)');
+        radGrad.addColorStop(1, 'rgba(168, 85, 247, 0.02)');
+      } else if (GAME.altitude === 'LOW') {
+        radGrad.addColorStop(0, 'rgba(234, 179, 8, 0.24)');
+        radGrad.addColorStop(0.7, 'rgba(234, 179, 8, 0.10)');
+        radGrad.addColorStop(1, 'rgba(234, 179, 8, 0.02)');
+      } else {
+        radGrad.addColorStop(0, 'rgba(239, 68, 68, 0.32)');
+        radGrad.addColorStop(0.7, 'rgba(239, 68, 68, 0.14)');
+        radGrad.addColorStop(1, 'rgba(239, 68, 68, 0.03)');
+      }
+
+      ctx.beginPath();
+      ctx.arc(e.x, e.y, radius, 0, Math.PI * 2);
+      ctx.fillStyle = radGrad;
+      ctx.fill();
+
+      // Sweeping radar beam cone (animated)
+      ctx.beginPath();
+      ctx.moveTo(e.x, e.y);
+      ctx.arc(e.x, e.y, radius, e.radarAngle, e.radarAngle + 0.35);
+      ctx.closePath();
+      ctx.fillStyle = jammerActive
+        ? 'rgba(216, 180, 254, 0.25)'
+        : (GAME.altitude === 'LOW' ? 'rgba(253, 224, 71, 0.22)' : 'rgba(248, 113, 113, 0.28)');
+      ctx.fill();
+    }
+  }
+  ctx.restore();
+
+  // PASS 2: SAM Radar boundaries, concentric rings, transmitters & MANPADS
+  for (const e of groundEnemies) {
+    if (e.type === 'SAM') {
+      const radius = e.radarRange * altitudeMultiplier * jammerMultiplier;
+
+      ctx.save();
+      // Outer radar boundary (crisp dashed line)
+      ctx.beginPath();
+      ctx.arc(e.x, e.y, radius, 0, Math.PI * 2);
+      ctx.strokeStyle = jammerActive
+        ? 'rgba(168, 85, 247, 0.75)'
+        : (GAME.altitude === 'LOW' ? 'rgba(234, 179, 8, 0.65)' : 'rgba(239, 68, 68, 0.85)');
+      ctx.lineWidth = 2.2;
+      ctx.setLineDash([12, 10]);
+      ctx.stroke();
+
+      // Mid-range concentric ring helper
+      ctx.beginPath();
+      ctx.arc(e.x, e.y, radius * 0.5, 0, Math.PI * 2);
+      ctx.strokeStyle = jammerActive
+        ? 'rgba(168, 85, 247, 0.25)'
+        : (GAME.altitude === 'LOW' ? 'rgba(234, 179, 8, 0.20)' : 'rgba(239, 68, 68, 0.25)');
+      ctx.lineWidth = 1;
+      ctx.setLineDash([6, 8]);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      // Fortified radar station building
+      ctx.fillStyle = '#0f172a';
+      ctx.strokeStyle = '#dc2626';
+      ctx.lineWidth = 2.5;
+      ctx.beginPath();
+      ctx.arc(e.x, e.y, 22, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      // Rotating Radar dish
+      ctx.save();
+      ctx.translate(e.x, e.y);
+      ctx.rotate(e.radarAngle);
+      ctx.fillStyle = '#ef4444';
+      ctx.fillRect(-5, -16, 10, 32);
+      ctx.beginPath();
+      ctx.arc(0, 0, 8, 0, Math.PI * 2);
+      ctx.fillStyle = '#fca5a5';
+      ctx.fill();
+      ctx.restore();
+
+      // SAM Tactical HUD Label
+      ctx.font = 'bold 10px Courier New';
+      ctx.fillStyle = GAME.altitude === 'LOW' ? '#fde047' : '#f87171';
+      const statusText = jammerActive
+        ? `SAM ${Math.round(radius)}m [JAMMED -70%]`
+        : (GAME.altitude === 'LOW' ? `SAM ${Math.round(radius)}m [NOE -50%]` : `SAM ${Math.round(radius)}m [75% SCREEN DOME]`);
+      ctx.fillText(statusText, e.x - 70, e.y + 36);
+      ctx.restore();
+
+    } else if (e.type === 'MANPADS') {
+      ctx.save();
+      const isTargetable = (GAME.altitude === 'LOW');
+      ctx.fillStyle = isTargetable ? '#1e293b' : '#334155';
+      ctx.strokeStyle = isTargetable ? '#f59e0b' : '#64748b';
+      ctx.lineWidth = 1.5;
+
+      ctx.beginPath();
+      ctx.arc(e.x, e.y, 8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+
+      const aimAngle = isTargetable ? Math.atan2(player.y - e.y, player.x - e.x) : -Math.PI / 2;
+      ctx.save();
+      ctx.translate(e.x, e.y);
+      ctx.rotate(aimAngle);
+      ctx.fillStyle = isTargetable ? '#fbbf24' : '#64748b';
+      ctx.fillRect(-2, -3, 17, 6);
+      ctx.restore();
+
+      ctx.font = '8px Courier New';
+      ctx.fillStyle = isTargetable ? '#fde047' : '#94a3b8';
+      ctx.fillText(isTargetable ? 'MANPADS' : 'MANPADS (OOR)', e.x - 26, e.y + 18);
+      ctx.restore();
+    }
+  }
+}
+
+function renderRWRBearingLines() {
+  const jammerActive = GAME.jamActiveTimer > 0;
+  const jammerMultiplier = jammerActive ? 0.30 : 1.0;
+  const altitudeMultiplier = (GAME.altitude === 'LOW') ? 0.50 : 1.0;
+
+  for (const e of groundEnemies) {
+    if (e.type === 'SAM') {
+      const dist = Math.hypot(e.x - player.x, e.y - player.y);
+      const range = e.radarRange * altitudeMultiplier * jammerMultiplier;
+
+      // Draw RWR line whenever within transmitter horizon
+      if (dist < range * 1.5) {
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(player.x, player.y);
+        ctx.lineTo(e.x, e.y);
+        ctx.strokeStyle = dist <= range ? 'rgba(239, 68, 68, 0.65)' : 'rgba(234, 179, 8, 0.28)';
+        ctx.lineWidth = dist <= range ? 2.2 : 1;
+        ctx.setLineDash([5, 6]);
+        ctx.stroke();
+
+        // Strobe dot on warning ring
+        const angle = Math.atan2(e.y - player.y, e.x - player.x);
+        const strobeX = player.x + Math.cos(angle) * 38;
+        const strobeY = player.y + Math.sin(angle) * 38;
+        ctx.beginPath();
+        ctx.arc(strobeX, strobeY, 3.5, 0, Math.PI * 2);
+        ctx.fillStyle = dist <= range ? '#ef4444' : '#eab308';
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+  }
+}
+
+function renderDecoys() {
+  for (const d of decoys) {
+    if (d.type === 'FLARE') {
+      ctx.save();
+      const alpha = Math.min(1, d.life / 0.8);
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, d.radius, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(254, 240, 138, ${alpha})`;
+      ctx.shadowColor = '#f59e0b';
+      ctx.shadowBlur = 15;
+      ctx.fill();
+
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, d.radius * 0.4, 0, Math.PI * 2);
+      ctx.fillStyle = '#ffffff';
+      ctx.fill();
+      ctx.restore();
+    } else if (d.type === 'CHAFF') {
+      ctx.save();
+      const alpha = Math.min(0.7, d.life / 1.5);
+      ctx.beginPath();
+      ctx.arc(d.x, d.y, d.radius, 0, Math.PI * 2);
+      ctx.fillStyle = `rgba(34, 211, 238, ${alpha * 0.25})`;
+      ctx.strokeStyle = `rgba(165, 243, 252, ${alpha * 0.65})`;
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([3, 4]);
+      ctx.fill();
+      ctx.stroke();
+
+      for (let s = 0; s < 3; s++) {
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(d.x + (Math.sin(s * 2) * d.radius * 0.6), d.y + (Math.cos(s * 2) * d.radius * 0.6), 2, 2);
+      }
+      ctx.restore();
+    }
+  }
+}
+
+function renderMissiles() {
+  for (const m of missiles) {
+    ctx.save();
+    const angle = Math.atan2(m.vy, m.vx);
+    ctx.translate(m.x, m.y);
+    ctx.rotate(angle);
+
+    const isSam = m.sourceType === 'SAM';
+    ctx.fillStyle = isSam ? '#e2e8f0' : '#fb923c';
+    ctx.fillRect(-12, -3, 24, 6);
+
+    ctx.beginPath();
+    ctx.moveTo(12, -3);
+    ctx.lineTo(18, 0);
+    ctx.lineTo(12, 3);
+    ctx.closePath();
+    ctx.fillStyle = '#ef4444';
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.moveTo(-12, -2);
+    ctx.lineTo(-20 - Math.random() * 8, 0);
+    ctx.lineTo(-12, 2);
+    ctx.fillStyle = '#f59e0b';
+    ctx.fill();
+
+    // 5-second countdown bar
+    ctx.rotate(-angle);
+    ctx.fillStyle = 'rgba(0,0,0,0.7)';
+    ctx.fillRect(-16, -18, 32, 4);
+    const lifeRatio = Math.max(0, m.lifeTimer / m.maxLife);
+    ctx.fillStyle = lifeRatio < 0.3 ? '#ef4444' : '#22c55e';
+    ctx.fillRect(-15, -17, 30 * lifeRatio, 2);
+
+    ctx.restore();
+  }
+}
+
+function renderPlayerHelicopter() {
+  ctx.save();
+
+  const alt = player.altTransition;
+  const scale = 1.0 + (alt * 0.28);
+  const shadowDist = 12 + (alt * 32);
+  const shadowAlpha = 0.5 - (alt * 0.22);
+
+  // Ground Shadow
+  ctx.save();
+  ctx.translate(player.x + shadowDist * 0.6, player.y + shadowDist);
+  ctx.scale(scale * 0.95, scale * 0.95);
+  ctx.fillStyle = `rgba(0, 0, 0, ${shadowAlpha})`;
+  ctx.beginPath();
+  ctx.ellipse(0, 0, 16, 28, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // Helicopter Fuselage
+  ctx.translate(player.x, player.y);
+  ctx.scale(scale, scale);
+
+  ctx.fillStyle = '#1e3a1e';
+  ctx.strokeStyle = '#4ade80';
+  ctx.lineWidth = 1.8;
+
+  ctx.beginPath();
+  ctx.ellipse(0, 4, 15, 24, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.fillStyle = '#38bdf8';
+  ctx.beginPath();
+  ctx.ellipse(0, -8, 8, 11, 0, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = '#142914';
+  ctx.fillRect(-3, 22, 6, 26);
+  ctx.strokeRect(-3, 22, 6, 26);
+
+  ctx.fillStyle = '#94a3b8';
+  ctx.fillRect(-8, 45, 16, 3);
+
+  ctx.fillStyle = '#475569';
+  ctx.fillRect(-18, -6, 3, 24);
+  ctx.fillRect(15, -6, 3, 24);
+  ctx.fillRect(-18, 5, 36, 2);
+
+  // Spinning Rotor Blade
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(0, 0, 38, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255, 255, 255, 0.08)';
+  ctx.fill();
+
+  ctx.rotate(player.rotorAngle);
+  ctx.fillStyle = '#e2e8f0';
+  ctx.fillRect(-4, -40, 8, 80);
+  ctx.fillRect(-40, -4, 80, 8);
+
+  ctx.beginPath();
+  ctx.arc(0, 0, 5, 0, Math.PI * 2);
+  ctx.fillStyle = '#fbbf24';
+  ctx.fill();
+  ctx.restore();
+
+  ctx.beginPath();
+  ctx.arc(0, 0, player.hitRadius, 0, Math.PI * 2);
+  ctx.strokeStyle = GAME.altitude === 'HIGH' ? 'rgba(56, 189, 248, 0.55)' : 'rgba(234, 179, 8, 0.45)';
+  ctx.lineWidth = 1.5;
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function renderTerrain() {
+  ctx.strokeStyle = 'rgba(34, 197, 94, 0.08)';
+  ctx.lineWidth = 1;
+  const gridSize = 100;
+  const offsetY = GAME.terrainScrollY % gridSize;
+
+  for (let x = 0; x < WORLD_WIDTH; x += gridSize) {
+    ctx.beginPath();
+    ctx.moveTo(x, 0);
+    ctx.lineTo(x, screenHeight);
+    ctx.stroke();
+  }
+  for (let y = -gridSize; y < screenHeight + gridSize; y += gridSize) {
+    ctx.beginPath();
+    ctx.moveTo(0, y + offsetY);
+    ctx.lineTo(WORLD_WIDTH, y + offsetY);
+    ctx.stroke();
+  }
+
+  for (const tile of terrainTiles) {
+    const tileY = (tile.y + GAME.terrainScrollY) % (screenHeight * 2) - 100;
+    ctx.fillStyle = tile.color;
+    ctx.beginPath();
+    ctx.roundRect(tile.x, tileY, tile.width, tile.height, 24);
+    ctx.fill();
+    ctx.strokeStyle = 'rgba(20, 80, 40, 0.35)';
+    ctx.stroke();
+  }
+}
+
+function renderParticles() {
+  for (const p of particles) {
+    ctx.save();
+    const alpha = Math.max(0, p.life / p.maxLife);
+    ctx.fillStyle = p.color;
+    ctx.globalAlpha = alpha;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+}
+
+function renderWorldBoundaries() {
+  ctx.strokeStyle = '#ef4444';
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(10, 0);
+  ctx.lineTo(10, screenHeight);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(WORLD_WIDTH - 10, 0);
+  ctx.lineTo(WORLD_WIDTH - 10, screenHeight);
+  ctx.stroke();
+
+  ctx.font = '12px Courier New';
+  ctx.fillStyle = 'rgba(239, 68, 68, 0.6)';
+  ctx.fillText('BORDER SECTOR ALPHA', 20, 30);
+  ctx.fillText('BORDER SECTOR OMEGA', WORLD_WIDTH - 190, 30);
+}
+
+function renderFloatingJoystick() {
+  if (!touchStick.active) return;
+  ctx.save();
+  ctx.beginPath();
+  ctx.arc(touchStick.startX, touchStick.startY, touchStick.maxRadius, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(34, 197, 94, 0.15)';
+  ctx.strokeStyle = 'rgba(34, 197, 94, 0.6)';
+  ctx.lineWidth = 2;
+  ctx.fill();
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.arc(touchStick.startX + touchStick.dx, touchStick.startY + touchStick.dy, 22, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(74, 222, 128, 0.85)';
+  ctx.shadowColor = '#22c55e';
+  ctx.shadowBlur = 10;
+  ctx.fill();
+  ctx.restore();
+}
+
+function render() {
+  ctx.clearRect(0, 0, screenWidth, screenHeight);
+
+  ctx.save();
+  ctx.translate(-GAME.cameraX, 0);
+
+  renderTerrain();
+  renderGroundEnemies();
+  renderRWRBearingLines();
+  renderDecoys();
+  renderMissiles();
+  renderPlayerHelicopter();
+  renderParticles();
+  renderWorldBoundaries();
+
+  ctx.restore();
+
+  renderFloatingJoystick();
+}
+
+function gameLoop(now) {
+  const dt = Math.min((now - lastFrameTime) / 1000, 0.08);
+  lastFrameTime = now;
+
+  if (GAME.running) {
+    update(dt);
+  }
+  render();
+
+  requestAnimationFrame(gameLoop);
+}
+
+function killPlayer(reason) {
+  if (!GAME.running) return;
+  GAME.running = false;
+
+  document.getElementById('deathCause').innerText = reason;
+  const mins = Math.floor(GAME.survivalTime / 60).toString().padStart(2, '0');
+  const secs = (GAME.survivalTime % 60).toFixed(2).padStart(5, '0');
+  document.getElementById('statTime').innerText = `${mins}:${secs}`;
+  document.getElementById('statEvaded').innerText = GAME.evadedCount;
+  document.getElementById('statFlares').innerText = `${GAME.flaresUsed} / 6`;
+  document.getElementById('statChaff').innerText = `${GAME.chaffUsed} / 6`;
+  document.getElementById('statJams').innerText = `${GAME.jamTotalUsed}`;
+
+  document.getElementById('gameOverModal').classList.remove('hidden');
+}
+
+function restartGame() {
+  document.getElementById('gameOverModal').classList.add('hidden');
+  GAME.running = true;
+  GAME.startTime = performance.now();
+  GAME.survivalTime = 0;
+  GAME.evadedCount = 0;
+  GAME.flaresLeft = 6;
+  GAME.flaresUsed = 0;
+  GAME.chaffLeft = 6;
+  GAME.chaffUsed = 0;
+  GAME.jamCooldown = 0;
+  GAME.jamActiveTimer = 0;
+  GAME.jamTotalUsed = 0;
+  GAME.altitude = 'LOW';
+  GAME.cameraX = screenWidth;
+
+  player.x = WORLD_WIDTH / 2;
+  player.y = screenHeight * 0.75;
+  player.vx = 0;
+  player.vy = 0;
+  player.altTransition = 0;
+
+  groundEnemies.length = 0;
+  missiles.length = 0;
+  decoys.length = 0;
+  particles.length = 0;
+
+  document.getElementById('flareCount').innerText = '6';
+  document.getElementById('chaffCount').innerText = '6';
+  document.getElementById('jamStatus').innerText = 'RDY';
+  document.getElementById('evadedCount').innerText = '0';
+  updateAltitudeUI();
+  initTerrain();
+  audio.setEngineSpeed(false);
+}
+
+window.onload = function() {
+  updateAltitudeUI();
+  requestAnimationFrame(gameLoop);
+};
+  </script>
+</body>
+</html>
